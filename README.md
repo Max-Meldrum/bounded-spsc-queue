@@ -1,7 +1,4 @@
-
 ## Bounded SPSC Queue
-
-[![Nightly Build Status](https://travis-ci.org/polyfractal/bounded-spsc-queue.svg?branch=master)](https://travis-ci.org/polyfractal/bounded-spsc-queue)
 
 This crate provides a very simple bounded, Single-producer Single-consumer (SPSC)
 queue for Rust.  It provides a data structure for two threads to communicate
@@ -12,10 +9,6 @@ speedup.  `sync_channel` utilizes an unbounded linked-list data structure under 
 while `bounded_spsc_queue` is a simple ring buffer with single, solid block of allocated
 memory.  The solid block of memory allows better cache pre-fetching due to less pointer
 indirection, and generally simpler operations to achieve a bounded SPSC queue.
-
-## Documentation
-
-[Documentation can be found here](http://polyfractal.github.io/bounded-spsc-queue/bounded_spsc_queue/index.html)
 
 ## Example
 
