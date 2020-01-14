@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 extern crate core;
 
 use core::alloc::Layout;
@@ -146,6 +144,62 @@ impl<T> Buffer<T> {
             }
         }
     }
+    /// Attempts to pop at most `target.len()` values off the buffer.
+    ///
+    /// Credit: Based on the the pull request from github user knsd
+    ///
+    /// Returns the amount of values successfully popped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut target = [0; 1024];
+    /// let popped = buffer.pop_batch(&mut target);
+    /// ```
+    pub fn pop_batch(&self, target: &mut [T]) -> usize {
+        let current_head = self.head.load(Ordering::Relaxed);
+
+        self.shadow_tail.set(self.tail.load(Ordering::Acquire));
+        if current_head == self.shadow_tail.get() {
+            return 0;
+        }
+
+        let mut diff = self.shadow_tail.get().wrapping_sub(current_head);
+        if diff > target.len() {
+            diff = target.len()
+        }
+
+        let start = current_head & (self.allocated_size - 1);
+        let mut mid_point = self.allocated_size - start;
+        let rest;
+        if mid_point > diff {
+            mid_point = diff;
+            rest = 0;
+        } else {
+            rest = diff as isize - mid_point as isize;
+        };
+
+        unsafe {
+            ptr::copy_nonoverlapping(
+                self.buffer.offset(start as isize),
+                target.as_mut_ptr(),
+                mid_point,
+            );
+
+            if rest > 0 {
+                ptr::copy_nonoverlapping(
+                    self.buffer,
+                    target.as_mut_ptr().offset(mid_point as isize),
+                    rest as usize,
+                )
+            }
+        }
+
+        self.head
+            .store(current_head.wrapping_add(diff), Ordering::Release);
+
+        diff
+    }
 
     /// Attempt to push a value onto the buffer.
     ///
@@ -216,7 +270,8 @@ impl<T> Buffer<T> {
     /// buffer wrapping is handled inside the method.
     #[inline]
     unsafe fn load(&self, pos: usize) -> &T {
-        &*self.buffer
+        &*self
+            .buffer
             .offset((pos & (self.allocated_size - 1)) as isize)
     }
 
@@ -228,7 +283,8 @@ impl<T> Buffer<T> {
     /// - Initialized a valid block of memory
     #[inline]
     unsafe fn store(&self, pos: usize, v: T) {
-        let end = self.buffer
+        let end = self
+            .buffer
             .offset((pos & (self.allocated_size - 1)) as isize);
         ptr::write(&mut *end, v);
     }
@@ -248,7 +304,8 @@ impl<T> Drop for Buffer<T> {
             let layout = Layout::from_size_align(
                 self.allocated_size * mem::size_of::<T>(),
                 mem::align_of::<T>(),
-            ).unwrap();
+            )
+            .unwrap();
             alloc::dealloc(self.buffer as *mut u8, layout);
         }
     }
@@ -490,6 +547,24 @@ impl<T> Consumer<T> {
         (*self.buffer).try_pop()
     }
 
+    /// Attempts to pop at most `target.len()` values off the buffer.
+    ///
+    /// Returns the amount of values successfully popped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bounded_spsc_queue::*;
+    ///
+    /// let (_, consumer) = make(100);
+    ///
+    /// let mut buffer = [0; 512];
+    /// let popped = consumer.pop_n(&mut buffer); // try to pop at most 512 elements
+    /// ```
+    pub fn pop_batch(&self, target: &mut [T]) -> usize {
+        (*self.buffer).pop_batch(target)
+    }
+
     /// Attempts to pop (and discard) at most `n` values off the buffer.
     ///
     /// Returns the amount of values successfully skipped.
@@ -685,6 +760,67 @@ mod tests {
             assert!(t == i);
         }
     }
+    #[test]
+    fn test_pop_batch() {
+        {
+            let (p, c) = super::make(500);
+            for _ in 0..500 {
+                for i in 0..500 {
+                    p.push(i)
+                }
+
+                let mut buf = vec![0; 500];
+
+                assert_eq!(c.pop_batch(&mut buf[..]), 500);
+                assert_eq!(buf, (0..500).collect::<Vec<_>>());
+            }
+        }
+
+        {
+            let (p, c) = super::make(8);
+            for i in 0..8 {
+                p.push(i)
+            }
+
+            let mut buf = vec![0; 8];
+            assert_eq!(c.pop_batch(&mut buf[..]), 8);
+            assert_eq!(buf, (0..8).collect::<Vec<_>>());
+        }
+
+        {
+            let (p, c) = super::make(500);
+            for i in 0..500 {
+                p.push(i)
+            }
+
+            {
+                let mut buf = [0, 0, 0];
+
+                assert_eq!(c.pop_batch(&mut buf), 3);
+                assert_eq!(c.size(), 497);
+                assert_eq!(buf, [0, 1, 2]);
+
+                assert_eq!(c.pop_batch(&mut buf), 3);
+                assert_eq!(c.size(), 494);
+                assert_eq!(buf, [3, 4, 5]);
+
+                c.pop();
+                c.pop();
+
+                assert_eq!(c.pop_batch(&mut buf), 3);
+                assert_eq!(c.size(), 489);
+                assert_eq!(buf, [8, 9, 10]);
+            }
+
+            {
+                let mut buf = [0; 1000];
+                let expected = 489;
+                assert_eq!(c.pop_batch(&mut buf), expected);
+                assert_eq!(c.size(), 0);
+                assert_eq!(&buf[..expected], &(11..500).collect::<Vec<_>>()[..]);
+            }
+        }
+    }
 
     extern crate time;
     use self::time::PreciseTime;
@@ -737,5 +873,4 @@ mod tests {
             (start.to(end)).num_nanoseconds().unwrap()
         );
     }
-
 }
